@@ -4,32 +4,76 @@ A local Retrieval-Augmented Generation (RAG) system built on top of the official
 
 ## Architecture
 
+### Phase 1 — Scrape
+
+Crawl all pages on `docs.python.org/3/` and save the clean text of each page as a JSON file locally. This is the raw data collection step — no embeddings or AI involved yet.
+
+```mermaid
+sequenceDiagram
+    participant S as scraper.py
+    participant L as scraped.log
+    participant W as docs.python.org
+    participant F as raw_pages/*.json
+
+    S->>L: Load already-scraped URLs
+    loop While pages remain in queue
+        S->>W: async GET (aiohttp, 10 concurrent)
+        W-->>S: HTML response
+        S->>S: Extract text with BeautifulSoup
+        S->>F: Save as slug.json (url, title, text)
+        S->>L: Append completed URL
+        S->>S: Discover new links → add to queue
+    end
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Phase 1 — Scrape                                               │
-│                                                                 │
-│  docs.python.org  ──►  BeautifulSoup  ──►  raw_pages/*.json    │
-│       (~1,000 pages)     (clean text)       (url, title, text) │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Phase 2 — Ingest                                               │
-│                                                                 │
-│  raw_pages/*.json  ──►  Chunker  ──►  Embedder  ──►  ChromaDB  │
-│                        (500 chars)  (MiniLM-L6)   (local disk) │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Phase 3 — Query                                                │
-│                                                                 │
-│  question ──► LLM rephrases ──► ChromaDB (per variant)         │
-│               (3 variants)      (top-5 each, deduplicated)     │
-│                                       │                        │
-│                                       ▼                        │
-│                            llama3.2 (streamed) ──► answer      │
-└─────────────────────────────────────────────────────────────────┘
+
+### Phase 2 — Ingest
+
+Take the scraped JSON files, split them into smaller chunks, convert each chunk into a vector (embedding), and store everything in ChromaDB. This builds the searchable knowledge base that the query step relies on.
+
+```mermaid
+sequenceDiagram
+    participant I as ingest.py
+    participant F as raw_pages/*.json
+    participant SP as RecursiveCharacterTextSplitter
+    participant EM as SentenceTransformer (all-MiniLM-L6-v2)
+    participant DB as ChromaDB
+
+    I->>DB: Check if collection exists
+    alt Collection already exists
+        DB-->>I: Skip — already ingested
+    else Collection does not exist
+        I->>F: Load all JSON files
+        F-->>I: pages (url, title, text)
+        I->>SP: Split text into chunks (500 chars / 50 overlap)
+        SP-->>I: chunks
+        I->>EM: Embed chunks in batches
+        EM-->>I: vectors
+        I->>DB: upsert (chunk, vector, metadata)
+    end
+```
+
+### Phase 3 — Query
+
+Accept a question, rephrase it into multiple variants to improve retrieval coverage, fetch the most relevant chunks from ChromaDB, and pass them as context to `llama3.2` to generate a grounded answer — streamed back token by token.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant Q as query.py
+    participant LLM as ChatOllama (llama3.2)
+    participant DB as ChromaDB
+
+    U->>Q: Enter question
+    Q->>LLM: generate_query_variants (ask for 3 rephrasings)
+    LLM-->>Q: variant 1, 2, 3 + original
+    loop For original + each variant
+        Q->>DB: similarity_search (top-5)
+        DB-->>Q: chunks + scores
+    end
+    Q->>Q: Deduplicate → unique chunks
+    Q->>LLM: prompt (context + question)
+    LLM-->>U: Stream answer token by token
+    Q->>U: Sources (list of URLs)
 ```
 
 ### Components
@@ -37,8 +81,8 @@ A local Retrieval-Augmented Generation (RAG) system built on top of the official
 | Component | Tool | Details |
 |---|---|---|
 | Web scraper | `aiohttp` + `BeautifulSoup4` | Async, 10 concurrent workers, resumable |
-| Text chunker | `langchain-text-splitters` | `RecursiveCharacterTextSplitter`, 500 chars, 50 overlap |
-| Embeddings | `sentence-transformers` | `all-MiniLM-L6-v2`, runs fully offline (~90 MB) |
+| Text splitter | `langchain-text-splitters` | `RecursiveCharacterTextSplitter`, 500 chars, 50 overlap |
+| Embedding model | `sentence-transformers` | `all-MiniLM-L6-v2`, runs fully offline (~90 MB) |
 | Vector store | `ChromaDB` | Persistent local storage in `./chroma_db/` |
 | LLM | `Ollama` + `llama3.2` | Runs locally, no API key needed |
 | RAG chain | `LangChain` LCEL | Multi-query retrieval + streamed answer |
@@ -128,7 +172,7 @@ Sources:
 
 ## How Multi-Query Retrieval Works
 
-A single question like `"How does asyncio work?"` only matches chunks using similar wording. Relevant content might be phrased differently across the docs (e.g. "event loop scheduling", "coroutine execution model"). 
+A single question like `"How does asyncio work?"` only matches chunks using similar wording. Relevant content might be phrased differently across the docs (e.g. "event loop scheduling", "coroutine execution model").
 
 `query.py` solves this by asking the LLM to generate 3 rephrasings of your question before searching. It then retrieves top-5 chunks per variant, deduplicates, and passes all unique chunks to the LLM as context — giving a broader and more accurate answer.
 

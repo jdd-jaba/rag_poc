@@ -4,44 +4,88 @@
 
 ## アーキテクチャ
 
+### Phase 1 — Scrape
+
+`docs.python.org/3/` 配下の全ページをクロールし、各ページのテキストを JSON ファイルとしてローカルに保存します。embedding や AI はまだ使わない、純粋なデータ収集のステップです。
+
+```mermaid
+sequenceDiagram
+    participant S as scraper.py
+    participant L as scraped.log
+    participant W as docs.python.org
+    participant F as raw_pages/*.json
+
+    S->>L: 取得済み URL を読み込み
+    loop 未取得ページがある間
+        S->>W: async GET (aiohttp, 10並列)
+        W-->>S: HTML レスポンス
+        S->>S: BeautifulSoup でテキスト抽出
+        S->>F: slug.json として保存 (url, title, text)
+        S->>L: 完了 URL を追記
+        S->>S: 新しいリンクを queue に追加
+    end
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  フェーズ 1 — スクレイピング                                     │
-│                                                                 │
-│  docs.python.org  ──►  BeautifulSoup  ──►  raw_pages/*.json    │
-│      （約1,000ページ）   （テキスト抽出）   （url, title, text） │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  フェーズ 2 — インジェスト                                       │
-│                                                                 │
-│  raw_pages/*.json  ──►  分割  ──►  埋め込み  ──►  ChromaDB      │
-│                       （500字）  （MiniLM-L6）  （ローカル保存） │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  フェーズ 3 — クエリ                                             │
-│                                                                 │
-│  質問 ──► LLMが言い換え ──► ChromaDB（バリアントごと）           │
-│           （3バリアント）    （上位5件ずつ、重複除去）            │
-│                                    │                           │
-│                                    ▼                           │
-│                         llama3.2（ストリーミング）──► 回答      │
-└─────────────────────────────────────────────────────────────────┘
+
+### Phase 2 — Ingest
+
+スクレイピングした JSON ファイルを小さな chunk に分割し、各 chunk を vector（embedding）に変換して ChromaDB に保存します。query ステップが検索に使う知識ベースをここで構築します。
+
+```mermaid
+sequenceDiagram
+    participant I as ingest.py
+    participant F as raw_pages/*.json
+    participant SP as RecursiveCharacterTextSplitter
+    participant EM as SentenceTransformer (all-MiniLM-L6-v2)
+    participant DB as ChromaDB
+
+    I->>DB: collection が存在するか確認
+    alt 既に存在する場合
+        DB-->>I: スキップ
+    else 存在しない場合
+        I->>F: 全 JSON ファイルを読み込み
+        F-->>I: pages (url, title, text)
+        I->>SP: テキストを chunk に分割 (500字 / 50字オーバーラップ)
+        SP-->>I: chunks
+        I->>EM: chunk を embed (バッチ処理)
+        EM-->>I: vectors
+        I->>DB: upsert (chunk, vector, metadata)
+    end
+```
+
+### Phase 3 — Query
+
+質問を受け取り、複数の variant に言い換えて検索範囲を広げ、ChromaDB から最も関連性の高い chunk を取得します。それを context として `llama3.2` に渡し、根拠のある回答をトークンごとにストリーミングで返します。
+
+```mermaid
+sequenceDiagram
+    participant U as ユーザー
+    participant Q as query.py
+    participant LLM as ChatOllama (llama3.2)
+    participant DB as ChromaDB
+
+    U->>Q: 質問を入力
+    Q->>LLM: generate_query_variants (3通りに言い換えを依頼)
+    LLM-->>Q: variant 1, 2, 3 + original
+    loop original + 各 variant
+        Q->>DB: similarity_search (top-5)
+        DB-->>Q: chunks + scores
+    end
+    Q->>Q: 重複除去 → unique chunks
+    Q->>LLM: prompt (context + 質問)
+    LLM-->>U: 回答をストリーミング
+    Q->>U: Sources (URL一覧)
 ```
 
 ### 使用コンポーネント
 
 | コンポーネント | ツール | 詳細 |
 |---|---|---|
-| Webスクレイパー | `aiohttp` + `BeautifulSoup4` | 非同期・10並列・中断再開対応 |
-| テキスト分割 | `langchain-text-splitters` | `RecursiveCharacterTextSplitter`、500字・50字オーバーラップ |
-| 埋め込みモデル | `sentence-transformers` | `all-MiniLM-L6-v2`、完全オフライン動作（約90MB） |
-| ベクトルストア | `ChromaDB` | `./chroma_db/` にローカル永続保存 |
+| Web scraper | `aiohttp` + `BeautifulSoup4` | 非同期・10並列・中断再開対応 |
+| Text splitter | `langchain-text-splitters` | `RecursiveCharacterTextSplitter`、500字・50字オーバーラップ |
+| Embedding model | `sentence-transformers` | `all-MiniLM-L6-v2`、完全オフライン動作（約90MB） |
+| Vector store | `ChromaDB` | `./chroma_db/` にローカル永続保存 |
 | LLM | `Ollama` + `llama3.2` | ローカル実行、APIキー不要 |
-| RAGチェーン | `LangChain` LCEL | マルチクエリ検索 + ストリーミング回答 |
+| RAG chain | `LangChain` LCEL | Multi-query retrieval + streaming 回答 |
 
 ## 事前準備
 
@@ -59,9 +103,9 @@
 
 ## 実行手順
 
-### ステップ 1 — ドキュメントのスクレイピング
+### Step 1 — Scrape
 
-`docs.python.org/3/` 配下の全ページをクロールし、JSONファイルとして保存します。
+`docs.python.org/3/` 配下の全ページをクロールし、JSON ファイルとして保存します。
 中断しても安全です。再実行時は取得済みのページは自動でスキップされます。
 
 ```bash
@@ -71,10 +115,10 @@ python scraper.py
 出力：`raw_pages/*.json`（約1,000ファイル）と `scraped.log`
 所要時間：約2〜3分
 
-### ステップ 2 — ChromaDB へのインジェスト
+### Step 2 — Ingest
 
-スクレイピング済みの全ページをチャンクに分割し、埋め込みを生成してベクトルデータベースに保存します。
-再実行しても安全です。コレクションが既に存在する場合はスキップされます。
+スクレイピング済みの全ページをチャンクに分割し、embedding を生成して vector database に保存します。
+再実行しても安全です。collection が既に存在する場合はスキップされます。
 
 ```bash
 python ingest.py
@@ -83,12 +127,12 @@ python ingest.py
 出力：`chroma_db/` ディレクトリ
 所要時間：Apple Silicon で約1〜2分
 
-### ステップ 3 — 質問する
+### Step 3 — Query
 
 ```bash
 python query.py "asyncio はどのように動作しますか？"
 python query.py "リストとタプルの違いは何ですか？"
-python query.py "コンテキストマネージャはどう使いますか？"
+python query.py "context manager はどう使いますか？"
 ```
 
 出力例：
@@ -100,8 +144,8 @@ Generating query variants...
 
 [Query variants (4 total)]
   original: asyncio はどのように動作しますか？
-  variant 1: Python の asyncio イベントループとは何ですか？
-  variant 2: Python でコルーチンはどのようにスケジュールされますか？
+  variant 1: Python の asyncio event loop とは何ですか？
+  variant 2: Python で coroutine はどのように schedule されますか？
   variant 3: async/await は内部でどのように動作しますか？
 
 [Retrieved chunks for original query]
@@ -116,36 +160,36 @@ Generating query variants...
 ------------------------------------------------------------
 Answer:
 
-asyncio は async/await 構文を使って並行処理を記述するためのライブラリです。
-イベントループを使用してコルーチンを管理・スケジュールします...
+asyncio は async/await 構文を使って並行処理を記述するための library です。
+event loop を使用して coroutine を管理・schedule します...
 
 Sources:
   - https://docs.python.org/3/library/asyncio.html
   - https://docs.python.org/3/library/asyncio-task.html
 ```
 
-> **スコアについて：** 値が低いほど関連性が高い（コサイン距離）。`0.2` 未満は強い一致、`0.4` 以上は一致度が低いことを示します。ドキュメントの範囲外の質問をした際の目安になります。
+> **score について：** 値が低いほど関連性が高い（cosine distance）。`0.2` 未満は強い一致、`0.4` 以上は一致度が低いことを示します。
 
-## マルチクエリ検索の仕組み
+## Multi-Query Retrieval の仕組み
 
-`"asyncio はどのように動作しますか？"` という質問は、同じ表現を使ったチャンクにしかマッチしません。しかし関連するドキュメントは「イベントループのスケジューリング」「コルーチンの実行モデル」など、異なる表現で書かれている場合があります。
+`"asyncio はどのように動作しますか？"` という質問は、同じ表現を使った chunk にしかマッチしません。しかし関連するドキュメントは `"event loop のスケジューリング"` や `"coroutine の実行モデル"` など、異なる表現で書かれている場合があります。
 
-`query.py` では、検索前に LLM が質問を3通りに言い換えます。各バリアントで上位5件のチャンクを取得し、重複を除いたうえで全チャンクを LLM に渡すことで、より広く正確な回答を生成します。
+`query.py` では、検索前に LLM が質問を3通りに言い換えます。各 variant で上位5件の chunk を取得し、重複を除いたうえで全 chunk を LLM に渡すことで、より広く正確な回答を生成します。
 
 ## プロジェクト構成
 
 ```
 rag_poc/
-├── scraper.py          # フェーズ1：非同期Webクローラー
-├── ingest.py           # フェーズ2：分割・埋め込み・保存
-├── query.py            # フェーズ3：マルチクエリ検索 + ストリーミング回答
-├── requirements.txt    # Python依存ライブラリ
+├── scraper.py          # Phase 1: async web crawler
+├── ingest.py           # Phase 2: chunk, embed, store
+├── query.py            # Phase 3: multi-query retrieval + streaming 回答
+├── requirements.txt    # Python dependencies
 ├── .gitignore
 │
-│   # 生成ファイル — gitには含まれません
-├── raw_pages/          # スクレイピングしたJSONファイル（1ページ1ファイル）
-├── scraped.log         # 取得済みURLの記録（再開用）
-└── chroma_db/          # ChromaDB ベクトルストア
+│   # 生成ファイル — git には含まれません
+├── raw_pages/          # スクレイピングした JSON ファイル（1ページ1ファイル）
+├── scraped.log         # 取得済み URL の記録（再開用）
+└── chroma_db/          # ChromaDB vector store
 ```
 
 > `raw_pages/`、`scraped.log`、`chroma_db/` は `.gitignore` で除外されています。
