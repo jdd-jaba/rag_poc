@@ -2,7 +2,11 @@
 Query the Python docs RAG system.
 
 Uses LangChain LCEL to wire together:
-  ChromaDB retriever → prompt → ChatOllama (llama3.2) → answer
+  MultiQueryRetriever → prompt → ChatOllama (llama3.2, streamed) → answer
+
+MultiQueryRetriever rephrases the question into several variants, retrieves
+chunks for each, deduplicates, then passes all unique chunks as context.
+This improves recall for conceptual questions where wording varies.
 
 Usage:
     python query.py "How does asyncio work?"
@@ -11,7 +15,10 @@ Usage:
 Run AFTER ingest.py has finished building the ChromaDB collection.
 """
 
+import logging
 import sys
+
+logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
 
 import chromadb
 from langchain_chroma import Chroma
@@ -48,8 +55,85 @@ def format_docs(docs: list[Document]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def build_chain(chroma_dir: str, collection_name: str):
-    """Build and return the LangChain LCEL retrieval chain."""
+def get_sources(docs: list[Document]) -> list[str]:
+    """Return deduplicated source URLs from retrieved docs."""
+    seen: set[str] = set()
+    sources = []
+    for doc in docs:
+        url = doc.metadata.get("source_url", "")
+        if url and url not in seen:
+            seen.add(url)
+            sources.append(url)
+    return sources
+
+
+MULTI_QUERY_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "You are a helpful assistant that generates search queries."),
+    ("human", (
+        "Generate {n} different rephrasings of the following question to improve "
+        "document retrieval. Each rephrasing should approach the topic from a "
+        "slightly different angle. Output ONLY the questions, one per line, "
+        "with no numbering or extra text.\n\nQuestion: {question}"
+    )),
+])
+
+
+def generate_query_variants(question: str, llm: ChatOllama, n: int = 3) -> list[str]:
+    """Use the LLM to rephrase the question into multiple search variants."""
+    chain = MULTI_QUERY_PROMPT | llm | StrOutputParser()
+    result = chain.invoke({"question": question, "n": n})
+    variants = [q.strip() for q in result.strip().splitlines() if q.strip()]
+    # Always include the original question
+    all_queries = [question] + variants
+    return all_queries
+
+
+def multi_query_retrieve(
+    question: str,
+    vectorstore: Chroma,
+    llm: ChatOllama,
+) -> tuple[list[Document], list[tuple[Document, float]]]:
+    """Generate query variants, retrieve for each, and deduplicate results.
+
+    Returns:
+        unique_docs: deduplicated docs for context
+        scored_hits: list of (doc, score) for the first (original) query,
+                     used to display relevance scores to the user
+    """
+    queries = generate_query_variants(question, llm)
+
+    print(f"\n[Query variants ({len(queries)} total)]")
+    for i, q in enumerate(queries):
+        label = "original" if i == 0 else f"variant {i}"
+        print(f"  {label}: {q}")
+
+    seen_content: set[str] = set()
+    unique_docs: list[Document] = []
+    scored_hits: list[tuple[Document, float]] = []
+
+    for i, query in enumerate(queries):
+        # Use similarity_search_with_score to get cosine distances
+        hits = vectorstore.similarity_search_with_score(query, k=TOP_K)
+
+        if i == 0:
+            # Log scores for the original question
+            print(f"\n[Retrieved chunks for original query]")
+            for doc, score in hits:
+                title = doc.metadata.get("title", "untitled")[:55]
+                print(f"  score {score:.4f} | {title}")
+            scored_hits = hits
+
+        for doc, _ in hits:
+            if doc.page_content not in seen_content:
+                seen_content.add(doc.page_content)
+                unique_docs.append(doc)
+
+    print(f"\n[Total unique chunks passed to LLM: {len(unique_docs)}]")
+    return unique_docs, scored_hits
+
+
+def build_components(chroma_dir: str, collection_name: str):
+    """Build and return the vectorstore and LLM."""
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
     vectorstore = Chroma(
@@ -58,30 +142,9 @@ def build_chain(chroma_dir: str, collection_name: str):
         embedding_function=embeddings,
     )
 
-    retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K})
     llm = ChatOllama(model=LLM_MODEL, temperature=0)
 
-    chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | PROMPT_TEMPLATE
-        | llm
-        | StrOutputParser()
-    )
-
-    return chain, retriever
-
-
-def get_sources(retriever, question: str) -> list[str]:
-    """Return deduplicated source URLs for the retrieved chunks."""
-    docs = retriever.invoke(question)
-    seen = set()
-    sources = []
-    for doc in docs:
-        url = doc.metadata.get("source_url", "")
-        if url and url not in seen:
-            seen.add(url)
-            sources.append(url)
-    return sources
+    return vectorstore, llm
 
 
 def main() -> None:
@@ -95,17 +158,25 @@ def main() -> None:
     print("-" * 60)
 
     try:
-        chain, retriever = build_chain(CHROMA_DIR, COLLECTION_NAME)
+        vectorstore, llm = build_components(CHROMA_DIR, COLLECTION_NAME)
     except Exception as e:
         print(f"Error loading ChromaDB: {e}")
         print("Make sure you have run ingest.py first.")
         sys.exit(1)
 
-    print("Answer:\n")
-    answer = chain.invoke(question)
-    print(answer)
+    print("\nGenerating query variants...")
+    docs, _ = multi_query_retrieve(question, vectorstore, llm)
+    sources = get_sources(docs)
+    context = format_docs(docs)
 
-    sources = get_sources(retriever, question)
+    prompt_value = PROMPT_TEMPLATE.invoke({"context": context, "question": question})
+
+    print("\n" + "-" * 60)
+    print("Answer:\n")
+    for chunk in llm.stream(prompt_value):
+        print(chunk.content, end="", flush=True)
+    print()
+
     if sources:
         print("\nSources:")
         for url in sources:

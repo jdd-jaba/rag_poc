@@ -14,7 +14,10 @@ print the current count and exit without re-ingesting.
 
 import glob
 import json
+import logging
 import os
+
+logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
 
 import chromadb
 from langchain_text_splitters import RecursiveCharacterTextSplitter
