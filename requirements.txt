@@ -1,0 +1,17 @@
+# Scraping
+aiohttp>=3.9.0
+beautifulsoup4>=4.12.0
+tqdm>=4.66.0
+
+# Ingest
+langchain-text-splitters>=0.3.0
+sentence-transformers>=3.0.0
+chromadb>=0.5.0
+
+# Query
+langchain>=0.3.0
+langchain-community>=0.3.0
+langchain-chroma>=0.1.0
+langchain-huggingface>=0.1.0
+langchain-ollama>=0.2.0
+ollama>=0.3.0

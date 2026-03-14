@@ -1,0 +1,6 @@
+*chroma_db/
+raw_pages/
+scraped.log
+__pycache__/
+*.pyc
+.env
