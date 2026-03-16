@@ -1,5 +1,5 @@
 """
-Query the Python docs RAG system.
+Query the Google Cloud Next RAG system.
 
 Uses LangChain LCEL to wire together:
   MultiQueryRetriever → prompt → ChatOllama (llama3.2, streamed) → answer
@@ -9,8 +9,8 @@ chunks for each, deduplicates, then passes all unique chunks as context.
 This improves recall for conceptual questions where wording varies.
 
 Usage:
-    python query.py "How does asyncio work?"
-    python query.py "What is the difference between a list and a tuple?"
+    python query.py "When is Google Cloud Next 2026?"
+    python query.py "Who are the keynote speakers?"
 
 Run AFTER ingest.py has finished building the ChromaDB collection.
 """
@@ -30,15 +30,15 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama import ChatOllama
 
 CHROMA_DIR = "chroma_db"
-COLLECTION_NAME = "python_docs"
+COLLECTION_NAME = "google_cloud_next"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 LLM_MODEL = "llama3.2"
 TOP_K = 5
 
-SYSTEM_PROMPT = """You are a helpful Python documentation assistant.
+SYSTEM_PROMPT = """You are a helpful assistant for the Google Cloud Next 2026 conference.
 Answer the question using ONLY the context provided below.
 If the context does not contain enough information, say so clearly.
-Keep your answer concise and accurate. Include code examples when helpful."""
+Keep your answer concise and accurate."""
 
 PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
     ("system", SYSTEM_PROMPT),
