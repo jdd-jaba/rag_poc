@@ -19,7 +19,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 
-BASE_URL = "https://www.googlecloudevents.com/next-vegas"
+BASE_URL = "https://www.googlecloudevents.com/next-vegas/"
 OUTPUT_DIR = "raw_pages"
 LOG_FILE = "scraped.log"
 CONCURRENCY = 10
@@ -51,7 +51,7 @@ def is_internal_doc_url(url: str) -> bool:
     netloc = parsed.netloc or _BASE_NETLOC
     return (
         netloc == _BASE_NETLOC
-        and parsed.path.startswith(_BASE_PATH_PREFIX)
+        and (parsed.path == _BASE_PATH_PREFIX or parsed.path.startswith(_BASE_PATH_PREFIX + "/"))
         and not parsed.fragment
         and not parsed.path.endswith((".pdf", ".zip", ".png", ".jpg", ".svg", ".css", ".js"))
     )
