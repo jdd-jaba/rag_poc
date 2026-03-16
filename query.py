@@ -147,22 +147,10 @@ def build_components(chroma_dir: str, collection_name: str):
     return vectorstore, llm
 
 
-def main() -> None:
-    if len(sys.argv) < 2:
-        print("Usage: python query.py \"your question here\"")
-        sys.exit(1)
-
-    question = " ".join(sys.argv[1:])
-
+def ask(question: str, vectorstore, llm) -> None:
+    """Run a single question through the RAG pipeline and print the answer."""
     print(f"\nQuestion: {question}")
     print("-" * 60)
-
-    try:
-        vectorstore, llm = build_components(CHROMA_DIR, COLLECTION_NAME)
-    except Exception as e:
-        print(f"Error loading ChromaDB: {e}")
-        print("Make sure you have run ingest.py first.")
-        sys.exit(1)
 
     print("\nGenerating query variants...")
     docs, _ = multi_query_retrieve(question, vectorstore, llm)
@@ -181,6 +169,35 @@ def main() -> None:
         print("\nSources:")
         for url in sources:
             print(f"  - {url}")
+
+
+def main() -> None:
+    try:
+        vectorstore, llm = build_components(CHROMA_DIR, COLLECTION_NAME)
+    except Exception as e:
+        print(f"Error loading ChromaDB: {e}")
+        print("Make sure you have run ingest.py first.")
+        sys.exit(1)
+
+    # If a question was passed as a CLI argument, answer it and drop into the loop
+    if len(sys.argv) > 1:
+        ask(" ".join(sys.argv[1:]), vectorstore, llm)
+
+    print("\nEnter your question (or 'exit' / Ctrl+C to quit):")
+    while True:
+        try:
+            question = input("\n> ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nGoodbye!")
+            break
+
+        if not question:
+            continue
+        if question.lower() in ("exit", "quit", "q"):
+            print("Goodbye!")
+            break
+
+        ask(question, vectorstore, llm)
 
 
 if __name__ == "__main__":
