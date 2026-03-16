@@ -1,18 +1,18 @@
-# Python Docs RAG
+# Google Cloud Next RAG
 
-A local Retrieval-Augmented Generation (RAG) system built on top of the official [Python 3 documentation](https://docs.python.org/3/). Everything runs on your machine — no cloud APIs, no data sent anywhere.
+A local Retrieval-Augmented Generation (RAG) system built on top of the [Google Cloud Next 2026](https://www.googlecloudevents.com/next-vegas) conference website. Everything runs on your machine — no cloud APIs, no data sent anywhere.
 
 ## Architecture
 
 ### Phase 1 — Scrape
 
-Crawl all pages on `docs.python.org/3/` and save the clean text of each page as a JSON file locally. This is the raw data collection step — no embeddings or AI involved yet.
+Crawl all pages under `googlecloudevents.com/next-vegas` and save the clean text of each page as a JSON file locally. This is the raw data collection step — no embeddings or AI involved yet.
 
 ```mermaid
 sequenceDiagram
     participant S as scraper.py
     participant L as scraped.log
-    participant W as docs.python.org
+    participant W as googlecloudevents.com
     participant F as raw_pages/*.json
 
     S->>L: Load already-scraped URLs
@@ -103,17 +103,16 @@ sequenceDiagram
 
 ## How to Run
 
-### Step 1 — Scrape the docs
+### Step 1 — Scrape the site
 
-Crawls all pages under `docs.python.org/3/` and saves them as JSON files.
+Crawls all pages under `googlecloudevents.com/next-vegas` and saves them as JSON files.
 Safe to interrupt and resume — already-scraped pages are skipped automatically.
 
 ```bash
 python scraper.py
 ```
 
-Output: `raw_pages/*.json` (~1,000 files) and `scraped.log`
-Time: ~2–3 minutes
+Output: `raw_pages/*.json` and `scraped.log`
 
 ### Step 2 — Ingest into ChromaDB
 
@@ -125,54 +124,51 @@ python ingest.py
 ```
 
 Output: `chroma_db/` directory
-Time: ~1–2 minutes on Apple Silicon
 
 ### Step 3 — Ask questions
 
 ```bash
-python query.py "How does asyncio work?"
-python query.py "What is the difference between a list and a tuple?"
-python query.py "How do I use context managers?"
+python query.py "When is Google Cloud Next 2026?"
+python query.py "Who are the keynote speakers?"
+python query.py "What sessions are available?"
 ```
 
 Example output:
 ```
-Question: How does asyncio work?
+Question: When is Google Cloud Next 2026?
 ------------------------------------------------------------
 
 Generating query variants...
 
 [Query variants (4 total)]
-  original: How does asyncio work?
-  variant 1: What is Python's asyncio event loop?
-  variant 2: How are coroutines scheduled in Python?
-  variant 3: What does async/await do under the hood?
+  original: When is Google Cloud Next 2026?
+  variant 1: What are the dates for Google Cloud Next 2026?
+  variant 2: Where and when is the Google Cloud Next conference held?
+  variant 3: What is the schedule for Google Cloud Next 2026?
 
 [Retrieved chunks for original query]
-  score 0.1823 | asyncio — Asynchronous I/O — Python 3.14.3 doc
-  score 0.2104 | asyncio-task — Coroutines and Tasks — Python 3...
-  score 0.2341 | asyncio-eventloop — Event Loop — Python 3.14.3
-  score 0.2789 | library/concurrent.futures — Python 3.14.3 doc
-  score 0.3102 | whatsnew/3.11 — What's New In Python 3.11
+  score 0.1214 | Google Cloud Next 2026 – Las Vegas Conference
+  score 0.1893 | Google Cloud Next 2026 – Las Vegas Conference
+  score 0.2341 | Google Cloud Next 2026 – Las Vegas Conference
+  score 0.3102 | Google Cloud Next 2026 – Las Vegas Conference
 
-[Total unique chunks passed to LLM: 14]
+[Total unique chunks passed to LLM: 8]
 
 ------------------------------------------------------------
 Answer:
 
-asyncio is a library for writing concurrent code using the async/await
-syntax. It uses an event loop to manage and schedule coroutines...
+Google Cloud Next 2026 will be held April 22–24, 2026 at the
+Mandalay Bay Convention Center in Las Vegas.
 
 Sources:
-  - https://docs.python.org/3/library/asyncio.html
-  - https://docs.python.org/3/library/asyncio-task.html
+  - https://www.googlecloudevents.com/next-vegas
 ```
 
-> **Score note:** Lower = more relevant (cosine distance). Under `0.2` is a strong match, above `0.4` is a weak match — useful for spotting when a question is outside the scope of the docs.
+> **Score note:** Lower = more relevant (cosine distance). Under `0.2` is a strong match, above `0.4` is a weak match.
 
 ## How Multi-Query Retrieval Works
 
-A single question like `"How does asyncio work?"` only matches chunks using similar wording. Relevant content might be phrased differently across the docs (e.g. "event loop scheduling", "coroutine execution model").
+A single question like `"When is Google Cloud Next 2026?"` only matches chunks using similar wording. Relevant content might be phrased differently on the site (e.g. "April 22–24", "Las Vegas", "Mandalay Bay").
 
 `query.py` solves this by asking the LLM to generate 3 rephrasings of your question before searching. It then retrieves top-5 chunks per variant, deduplicates, and passes all unique chunks to the LLM as context — giving a broader and more accurate answer.
 

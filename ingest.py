@@ -1,5 +1,5 @@
 """
-Ingest scraped Python docs into ChromaDB.
+Ingest scraped Google Cloud Next site into ChromaDB.
 
 Reads all raw_pages/*.json files, splits text into chunks, embeds them with
 a local sentence-transformers model, and stores everything in a persistent
@@ -26,7 +26,7 @@ from tqdm import tqdm
 
 RAW_PAGES_DIR = "raw_pages"
 CHROMA_DIR = "chroma_db"
-COLLECTION_NAME = "python_docs"
+COLLECTION_NAME = "google_cloud_next"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50

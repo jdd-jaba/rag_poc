@@ -1,18 +1,18 @@
-# Python Docs RAG
+# Google Cloud Next RAG
 
-公式の [Python 3 ドキュメント](https://docs.python.org/3/) をベースにしたローカル RAG（Retrieval-Augmented Generation）システムです。すべての処理は自分のマシン上で完結します。クラウド API は不要で、データが外部に送信されることはありません。
+[Google Cloud Next 2026](https://www.googlecloudevents.com/next-vegas) カンファレンスサイトをベースにしたローカル RAG（Retrieval-Augmented Generation）システムです。すべての処理は自分のマシン上で完結します。クラウド API は不要で、データが外部に送信されることはありません。
 
 ## アーキテクチャ
 
 ### Phase 1 — Scrape
 
-`docs.python.org/3/` 配下の全ページをクロールし、各ページのテキストを JSON ファイルとしてローカルに保存します。embedding や AI はまだ使わない、純粋なデータ収集のステップです。
+`googlecloudevents.com/next-vegas` 配下の全ページをクロールし、各ページのテキストを JSON ファイルとしてローカルに保存します。embedding や AI はまだ使わない、純粋なデータ収集のステップです。
 
 ```mermaid
 sequenceDiagram
     participant S as scraper.py
     participant L as scraped.log
-    participant W as docs.python.org
+    participant W as googlecloudevents.com
     participant F as raw_pages/*.json
 
     S->>L: 取得済み URL を読み込み
@@ -105,19 +105,18 @@ sequenceDiagram
 
 ### Step 1 — Scrape
 
-`docs.python.org/3/` 配下の全ページをクロールし、JSON ファイルとして保存します。
+`googlecloudevents.com/next-vegas` 配下の全ページをクロールし、JSON ファイルとして保存します。
 中断しても安全です。再実行時は取得済みのページは自動でスキップされます。
 
 ```bash
 python scraper.py
 ```
 
-出力：`raw_pages/*.json`（約1,000ファイル）と `scraped.log`
-所要時間：約2〜3分
+出力：`raw_pages/*.json` と `scraped.log`
 
 ### Step 2 — Ingest
 
-スクレイピング済みの全ページをチャンクに分割し、embedding を生成して vector database に保存します。
+スクレイピング済みの全ページを chunk に分割し、embedding を生成して vector database に保存します。
 再実行しても安全です。collection が既に存在する場合はスキップされます。
 
 ```bash
@@ -125,54 +124,51 @@ python ingest.py
 ```
 
 出力：`chroma_db/` ディレクトリ
-所要時間：Apple Silicon で約1〜2分
 
 ### Step 3 — Query
 
 ```bash
-python query.py "asyncio はどのように動作しますか？"
-python query.py "リストとタプルの違いは何ですか？"
-python query.py "context manager はどう使いますか？"
+python query.py "Google Cloud Next 2026 はいつですか？"
+python query.py "基調講演の登壇者は誰ですか？"
+python query.py "どんな session がありますか？"
 ```
 
 出力例：
 ```
-Question: asyncio はどのように動作しますか？
+Question: Google Cloud Next 2026 はいつですか？
 ------------------------------------------------------------
 
 Generating query variants...
 
 [Query variants (4 total)]
-  original: asyncio はどのように動作しますか？
-  variant 1: Python の asyncio event loop とは何ですか？
-  variant 2: Python で coroutine はどのように schedule されますか？
-  variant 3: async/await は内部でどのように動作しますか？
+  original: Google Cloud Next 2026 はいつですか？
+  variant 1: Google Cloud Next 2026 の開催日程は？
+  variant 2: Google Cloud Next カンファレンスはどこで開催されますか？
+  variant 3: Google Cloud Next 2026 の schedule を教えてください
 
 [Retrieved chunks for original query]
-  score 0.1823 | asyncio — Asynchronous I/O — Python 3.14.3 doc
-  score 0.2104 | asyncio-task — Coroutines and Tasks — Python 3...
-  score 0.2341 | asyncio-eventloop — Event Loop — Python 3.14.3
-  score 0.2789 | library/concurrent.futures — Python 3.14.3 doc
-  score 0.3102 | whatsnew/3.11 — What's New In Python 3.11
+  score 0.1214 | Google Cloud Next 2026 – Las Vegas Conference
+  score 0.1893 | Google Cloud Next 2026 – Las Vegas Conference
+  score 0.2341 | Google Cloud Next 2026 – Las Vegas Conference
+  score 0.3102 | Google Cloud Next 2026 – Las Vegas Conference
 
-[Total unique chunks passed to LLM: 14]
+[Total unique chunks passed to LLM: 8]
 
 ------------------------------------------------------------
 Answer:
 
-asyncio は async/await 構文を使って並行処理を記述するための library です。
-event loop を使用して coroutine を管理・schedule します...
+Google Cloud Next 2026 は 2026年4月22日〜24日、ラスベガスの
+Mandalay Bay Convention Center で開催されます。
 
 Sources:
-  - https://docs.python.org/3/library/asyncio.html
-  - https://docs.python.org/3/library/asyncio-task.html
+  - https://www.googlecloudevents.com/next-vegas
 ```
 
 > **score について：** 値が低いほど関連性が高い（cosine distance）。`0.2` 未満は強い一致、`0.4` 以上は一致度が低いことを示します。
 
 ## Multi-Query Retrieval の仕組み
 
-`"asyncio はどのように動作しますか？"` という質問は、同じ表現を使った chunk にしかマッチしません。しかし関連するドキュメントは `"event loop のスケジューリング"` や `"coroutine の実行モデル"` など、異なる表現で書かれている場合があります。
+`"Google Cloud Next 2026 はいつですか？"` という質問は、同じ表現を使った chunk にしかマッチしません。しかし関連する内容は `"April 22–24"` や `"Las Vegas"` `"Mandalay Bay"` など、異なる表現でサイト上に書かれている場合があります。
 
 `query.py` では、検索前に LLM が質問を3通りに言い換えます。各 variant で上位5件の chunk を取得し、重複を除いたうえで全 chunk を LLM に渡すことで、より広く正確な回答を生成します。
 

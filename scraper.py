@@ -1,7 +1,7 @@
 """
-Scraper for https://docs.python.org/3/
+Scraper for https://www.googlecloudevents.com/next-vegas
 
-Crawls all internal HTML pages asynchronously and saves each page as a JSON
+Crawls all internal pages asynchronously and saves each page as a JSON
 file under raw_pages/. Already-scraped URLs are tracked in scraped.log so
 the run can be safely interrupted and resumed.
 
@@ -19,37 +19,41 @@ import aiohttp
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 
-BASE_URL = "https://docs.python.org/3/"
+BASE_URL = "https://www.googlecloudevents.com/next-vegas"
 OUTPUT_DIR = "raw_pages"
 LOG_FILE = "scraped.log"
 CONCURRENCY = 10
 DELAY = 0.1  # seconds between requests per worker
 
 
+_BASE_PARSED = urlparse(BASE_URL)
+_BASE_NETLOC = _BASE_PARSED.netloc
+_BASE_PATH_PREFIX = _BASE_PARSED.path.rstrip("/")
+
+
 def url_to_slug(url: str) -> str:
     """Convert a URL to a safe filename slug.
 
     Example:
-        https://docs.python.org/3/library/os.html -> library__os.json
+        https://www.googlecloudevents.com/next-vegas -> next-vegas.json
+        https://www.googlecloudevents.com/next-vegas/speakers -> next-vegas__speakers.json
     """
-    path = urlparse(url).path
-    # Strip leading /3/ prefix
-    path = re.sub(r"^/3/", "", path)
-    # Replace path separators and dots with underscores
-    slug = path.replace("/", "__").replace(".", "_")
-    # Remove trailing underscores
-    slug = slug.strip("_")
+    parsed = urlparse(url)
+    path = parsed.path.strip("/") or "index"
+    slug = re.sub(r"[^a-zA-Z0-9_\-]", "_", path)
+    slug = re.sub(r"_+", "_", slug).strip("_")
     return slug + ".json"
 
 
 def is_internal_doc_url(url: str) -> bool:
-    """Return True if the URL is an internal docs.python.org/3/ page."""
+    """Return True if the URL is an internal page under the same site and path prefix."""
     parsed = urlparse(url)
+    netloc = parsed.netloc or _BASE_NETLOC
     return (
-        parsed.netloc in ("docs.python.org", "")
-        and parsed.path.startswith("/3/")
-        and parsed.path.endswith(".html")
-        and not parsed.fragment  # avoid duplicate anchored links
+        netloc == _BASE_NETLOC
+        and parsed.path.startswith(_BASE_PATH_PREFIX)
+        and not parsed.fragment
+        and not parsed.path.endswith((".pdf", ".zip", ".png", ".jpg", ".svg", ".css", ".js"))
     )
 
 
@@ -76,11 +80,12 @@ def extract_text(html: str) -> tuple[str, str]:
 
     title = soup.title.get_text(strip=True) if soup.title else ""
 
-    # docs.python.org wraps main content in <div role="main"> or <div class="body">
     main = (
-        soup.find("div", role="main")
-        or soup.find("div", class_="body")
+        soup.find("main")
         or soup.find("article")
+        or soup.find("div", role="main")
+        or soup.find("div", id="main")
+        or soup.find("div", class_="content")
         or soup.body
     )
 
