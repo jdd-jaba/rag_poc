@@ -65,7 +65,7 @@ def extract_session_urls_from_library_html(html: str) -> set[str]:
     """Parse session detail URLs embedded in session-library HTML (GoogleAgendaBuilder JSON)."""
     out: set[str] = set()
     for m in _MORE_INFO_URL_RE.finditer(html):
-        raw = m.group(1).replace("\\/", "/")
+        raw = m.group(1).replace("\\/", "/").split("#")[0]
         if not is_internal_doc_url(raw):
             continue
         parsed = urlparse(raw)
