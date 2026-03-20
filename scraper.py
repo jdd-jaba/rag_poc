@@ -20,6 +20,10 @@ from bs4 import BeautifulSoup
 from tqdm import tqdm
 
 BASE_URL = "https://www.googlecloudevents.com/next-vegas"
+SESSION_LIBRARY_TAB = "sessions"
+SESSION_LIBRARY_DATE = "all"
+SESSION_LIBRARY_MAX_PAGES = 500
+_MORE_INFO_URL_RE = re.compile(r'"moreInfoUrl"\s*:\s*"(https?:\\/\\/[^"]+)"')
 OUTPUT_DIR = "raw_pages"
 LOG_FILE = "scraped.log"
 CONCURRENCY = 10
@@ -55,6 +59,44 @@ def is_internal_doc_url(url: str) -> bool:
         and not parsed.fragment
         and not parsed.path.endswith((".pdf", ".zip", ".png", ".jpg", ".svg", ".css", ".js"))
     )
+
+
+def extract_session_urls_from_library_html(html: str) -> set[str]:
+    """Parse session detail URLs embedded in session-library HTML (GoogleAgendaBuilder JSON)."""
+    out: set[str] = set()
+    for m in _MORE_INFO_URL_RE.finditer(html):
+        raw = m.group(1).replace("\\/", "/")
+        if not is_internal_doc_url(raw):
+            continue
+        parsed = urlparse(raw)
+        normalized = parsed._replace(query="", fragment="").geturl()
+        out.add(normalized)
+    return out
+
+
+async def discover_session_urls_from_library(
+    session: aiohttp.ClientSession,
+) -> list[str]:
+    """Walk session-library ?page=N until a page adds no new session URLs."""
+    seen: set[str] = set()
+    page = 1
+    while page <= SESSION_LIBRARY_MAX_PAGES:
+        lib_url = (
+            f"{BASE_URL}/session-library"
+            f"?tab={SESSION_LIBRARY_TAB}&date={SESSION_LIBRARY_DATE}&page={page}"
+        )
+        html = await fetch(session, lib_url)
+        if html is None:
+            break
+        found = extract_session_urls_from_library_html(html)
+        if not found:
+            break
+        new = found - seen
+        if not new:
+            break
+        seen |= new
+        page += 1
+    return sorted(seen)
 
 
 def extract_links(html: str, base_url: str) -> list[str]:
@@ -147,7 +189,7 @@ async def worker(
         try:
             html = await fetch(session, url)
             if html is None:
-                return
+                continue
 
             title, text = extract_text(html)
             save_page(url, title, text)
@@ -185,17 +227,29 @@ async def run() -> None:
         visited.add(start_url)
         await queue.put(start_url)
 
-    if queue.empty():
-        print("Nothing new to scrape. All pages already done.")
-        return
-
     connector = aiohttp.TCPConnector(limit=CONCURRENCY)
     headers = {"User-Agent": "Mozilla/5.0 (compatible; rag-scraper/1.0)"}
 
-    with tqdm(total=len(visited), desc="Scraping", unit="page") as pbar:
-        pbar.update(len(already_scraped))
+    async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
+        session_urls = await discover_session_urls_from_library(session)
+        queued_sessions = 0
+        for u in session_urls:
+            if u not in visited:
+                visited.add(u)
+                await queue.put(u)
+                queued_sessions += 1
+        print(
+            f"Session library: {len(session_urls)} unique session URLs "
+            f"({queued_sessions} newly queued)."
+        )
 
-        async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
+        if queue.empty():
+            print("Nothing new to scrape. All pages already done.")
+            return
+
+        with tqdm(total=len(visited), desc="Scraping", unit="page") as pbar:
+            pbar.update(len(already_scraped))
+
             workers = [
                 asyncio.create_task(
                     worker(session, queue, visited, scraped, pbar, lock)
